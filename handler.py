@@ -1,6 +1,6 @@
 """
 RunPod Serverless Handler — Hunyuan3D 2.0 Full
-High-quality 3D asset generation (16GB VRAM, full quality)
+High-quality 3D asset generation optimized for H100
 """
 
 import runpod
@@ -12,6 +12,9 @@ import tempfile
 from PIL import Image
 import io
 
+# H100 optimizations
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 # Lazy load model
 _pipeline = None
 _texgen = None
@@ -19,15 +22,21 @@ _texgen = None
 def get_pipeline():
     global _pipeline, _texgen
     if _pipeline is None:
-        print("Loading Hunyuan3D 2.0 Full pipeline...")
+        print("Loading Hunyuan3D 2.0 Full pipeline (H100 optimized)...")
         from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
         from hy3dgen.texgen import Hunyuan3DPaintPipeline
+
+        # Detect H100/Hopper for BF16 (better than FP16 on H100)
+        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
+        use_bf16 = "H100" in gpu_name or "H800" in gpu_name or "Hopper" in gpu_name
+        dtype = torch.bfloat16 if use_bf16 else torch.float16
+        print(f"GPU: {gpu_name}, using dtype: {dtype}")
 
         # Full model (not mini)
         _pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
             "tencent/Hunyuan3D-2",
             subfolder="hunyuan3d-dit-v2-0",
-            torch_dtype=torch.float16,
+            torch_dtype=dtype,
         )
         _pipeline.to("cuda")
 
@@ -35,11 +44,11 @@ def get_pipeline():
         _texgen = Hunyuan3DPaintPipeline.from_pretrained(
             "tencent/Hunyuan3D-2",
             subfolder="hunyuan3d-paint-v2-0",
-            torch_dtype=torch.float16,
+            torch_dtype=dtype,
         )
         _texgen.to("cuda")
 
-        print("Hunyuan3D 2.0 Full loaded successfully")
+        print("Hunyuan3D 2.0 Full loaded successfully (H100 optimized)")
     return _pipeline, _texgen
 
 def handler(job):
