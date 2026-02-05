@@ -44,7 +44,7 @@ def handler(job):
 
     job_input = job["input"]
     image_b64 = job_input.get("image_b64")
-    resolution = job_input.get("resolution", 512)
+    resolution = job_input.get("resolution", 1536)  # Max quality by default
     seed = job_input.get("seed", -1)
     output_format = job_input.get("output_format", "glb")
 

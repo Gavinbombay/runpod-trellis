@@ -26,8 +26,9 @@ RUN git clone https://github.com/microsoft/TRELLIS.git /app/trellis_repo \
     && cd /app/trellis_repo \
     && pip install -e .
 
-# Pre-download model weights (large, ~8GB)
-RUN python -c "from trellis.pipelines import TrellisImageTo3DPipeline; TrellisImageTo3DPipeline.from_pretrained('microsoft/TRELLIS-image-large')"
+# Model downloads on first run (~8GB, adds to cold start but faster build)
+# HuggingFace cache dir
+ENV HF_HOME=/runpod-volume/hf_cache
 
 COPY handler.py /app/handler.py
 
