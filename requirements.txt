@@ -1,0 +1,12 @@
+runpod
+torch
+torchvision
+transformers
+diffusers
+accelerate
+trimesh
+pygltflib
+pillow
+numpy
+safetensors
+huggingface_hub
