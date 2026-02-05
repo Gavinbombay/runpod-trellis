@@ -1,6 +1,6 @@
 """
-RunPod Serverless Handler — Hunyuan3D 2.0 Full
-High-quality 3D asset generation optimized for H100
+RunPod Serverless Handler — Microsoft TRELLIS 2
+High-quality 3D asset generation (~3 sec on H100)
 """
 
 import runpod
@@ -14,53 +14,34 @@ import io
 
 # H100 optimizations
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["ATTN_BACKEND"] = "flash-attn"  # Use flash attention on H100
 
 # Lazy load model
 _pipeline = None
-_texgen = None
 
 def get_pipeline():
-    global _pipeline, _texgen
+    global _pipeline
     if _pipeline is None:
-        print("Loading Hunyuan3D 2.0 Full pipeline (H100 optimized)...")
-        from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
-        from hy3dgen.texgen import Hunyuan3DPaintPipeline
+        print("Loading TRELLIS 2 pipeline (H100 optimized)...")
+        from trellis2.pipelines import Trellis2ImageTo3DPipeline
 
-        # Detect H100/Hopper for BF16 (better than FP16 on H100)
-        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
-        use_bf16 = "H100" in gpu_name or "H800" in gpu_name or "Hopper" in gpu_name
-        dtype = torch.bfloat16 if use_bf16 else torch.float16
-        print(f"GPU: {gpu_name}, using dtype: {dtype}")
+        _pipeline = Trellis2ImageTo3DPipeline.from_pretrained("microsoft/TRELLIS.2-4B")
+        _pipeline.cuda()
 
-        # Full model (not mini)
-        _pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-            "tencent/Hunyuan3D-2",
-            subfolder="hunyuan3d-dit-v2-0",
-            torch_dtype=dtype,
-        )
-        _pipeline.to("cuda")
-
-        # Texture generator for full quality
-        _texgen = Hunyuan3DPaintPipeline.from_pretrained(
-            "tencent/Hunyuan3D-2",
-            subfolder="hunyuan3d-paint-v2-0",
-            torch_dtype=dtype,
-        )
-        _texgen.to("cuda")
-
-        print("Hunyuan3D 2.0 Full loaded successfully (H100 optimized)")
-    return _pipeline, _texgen
+        print("TRELLIS 2 loaded successfully")
+    return _pipeline
 
 def handler(job):
     """
-    Hunyuan3D 2.0 Full Image-to-3D Generation
+    TRELLIS 2 Image-to-3D Generation
 
     Input:
         image_b64: Base64 encoded input image
-        steps: Inference steps (default 50 for quality)
+        resolution: Output resolution - 512, 1024, or 1536 (default 512)
+        texture_size: Texture resolution (default 4096)
+        decimation_target: Mesh face count target (default 1000000)
         seed: Random seed (-1 for random)
-        texture: Generate textures (default true)
-        output_format: 'glb' or 'obj' - default 'glb'
+        output_format: 'glb' or 'obj' (default 'glb')
 
     Output:
         mesh_b64: Base64 encoded GLB/OBJ file
@@ -70,9 +51,10 @@ def handler(job):
 
     job_input = job["input"]
     image_b64 = job_input.get("image_b64")
-    steps = job_input.get("steps", 50)  # Higher for quality
+    resolution = job_input.get("resolution", 512)
+    texture_size = job_input.get("texture_size", 4096)
+    decimation_target = job_input.get("decimation_target", 1000000)
     seed = job_input.get("seed", -1)
-    with_texture = job_input.get("texture", True)
     output_format = job_input.get("output_format", "glb")
 
     if not image_b64:
@@ -88,35 +70,41 @@ def handler(job):
     # Set seed
     if seed == -1:
         seed = torch.randint(0, 2**32, (1,)).item()
-    generator = torch.Generator(device="cuda").manual_seed(seed)
+    torch.manual_seed(seed)
 
-    print(f"Generating 3D with {steps} steps, texture={with_texture}, seed={seed}")
+    print(f"Generating 3D with TRELLIS 2: resolution={resolution}, texture={texture_size}, seed={seed}")
 
     try:
-        pipeline, texgen = get_pipeline()
+        pipeline = get_pipeline()
 
         # Generate mesh
         with torch.no_grad():
-            mesh = pipeline(
-                image=image,
-                num_inference_steps=steps,
-                generator=generator,
-            )[0]
+            mesh = pipeline.run(image)[0]
+            mesh.simplify(16777216)  # nvdiffrast limit
 
-        # Generate texture if requested
-        if with_texture and texgen is not None:
-            print("Generating textures...")
-            mesh = texgen(
-                mesh=mesh,
-                image=image,
-                generator=generator,
-            )[0]
+        # Export to GLB
+        import o_voxel
 
-        # Export to file
         with tempfile.NamedTemporaryFile(suffix=f".{output_format}", delete=False) as f:
             output_path = f.name
 
-        mesh.export(output_path)
+        if output_format == "glb":
+            glb = o_voxel.postprocess.to_glb(
+                vertices=mesh.vertices,
+                faces=mesh.faces,
+                attr_volume=mesh.attrs,
+                coords=mesh.coords,
+                attr_layout=mesh.layout,
+                voxel_size=mesh.voxel_size,
+                aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+                decimation_target=decimation_target,
+                texture_size=texture_size,
+                remesh=True
+            )
+            glb.export(output_path, extension_webp=True)
+        else:
+            # OBJ export
+            mesh.export(output_path)
 
         # Read and encode
         with open(output_path, "rb") as f:
@@ -128,7 +116,7 @@ def handler(job):
 
         generation_time = round(time.time() - start_time, 2)
 
-        print(f"Generation complete: {generation_time}s, {len(mesh_data)} bytes")
+        print(f"TRELLIS 2 generation complete: {generation_time}s, {len(mesh_data)} bytes")
 
         return {
             "mesh_b64": mesh_b64,
@@ -136,7 +124,8 @@ def handler(job):
             "seed": seed,
             "format": output_format,
             "size_bytes": len(mesh_data),
-            "with_texture": with_texture,
+            "resolution": resolution,
+            "texture_size": texture_size,
         }
 
     except Exception as e:

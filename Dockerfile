@@ -1,28 +1,14 @@
-FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
+# Use community TRELLIS 2 image as base (includes all CUDA deps)
+FROM camenduru/trellis2:latest
 
 WORKDIR /app
 
-# Install system deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git wget libgl1-mesa-glx libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+# Install RunPod SDK
+RUN pip install --no-cache-dir runpod
 
-# Install Hunyuan3D 2.0 Full (not mini)
-RUN pip install --no-cache-dir \
-    runpod \
-    torch torchvision \
-    transformers \
-    diffusers \
-    accelerate \
-    trimesh \
-    pygltflib \
-    pillow \
-    numpy \
-    safetensors \
-    huggingface_hub \
-    hy3dgen
-
-# Model downloads on first run
+# H100 optimizations
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENV ATTN_BACKEND=flash-attn
 ENV HF_HOME=/runpod-volume/hf_cache
 
 COPY handler.py /app/handler.py
