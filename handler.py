@@ -1,6 +1,6 @@
 """
-RunPod Serverless Handler — TRELLIS 2 (Microsoft)
-High-quality 3D asset generation with PBR textures
+RunPod Serverless Handler — Hunyuan3D 2.0 Full
+High-quality 3D asset generation (16GB VRAM, full quality)
 """
 
 import runpod
@@ -14,46 +14,60 @@ import io
 
 # Lazy load model
 _pipeline = None
+_texgen = None
 
 def get_pipeline():
-    global _pipeline
+    global _pipeline, _texgen
     if _pipeline is None:
-        print("Loading TRELLIS 2 pipeline...")
-        from trellis.pipelines import TrellisImageTo3DPipeline
-        _pipeline = TrellisImageTo3DPipeline.from_pretrained("microsoft/TRELLIS-image-large")
+        print("Loading Hunyuan3D 2.0 Full pipeline...")
+        from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+        from hy3dgen.texgen import Hunyuan3DPaintPipeline
+
+        # Full model (not mini)
+        _pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
+            "tencent/Hunyuan3D-2",
+            subfolder="hunyuan3d-dit-v2-0",
+            torch_dtype=torch.float16,
+        )
         _pipeline.to("cuda")
-        print("TRELLIS 2 loaded successfully")
-    return _pipeline
+
+        # Texture generator for full quality
+        _texgen = Hunyuan3DPaintPipeline.from_pretrained(
+            "tencent/Hunyuan3D-2",
+            subfolder="hunyuan3d-paint-v2-0",
+            torch_dtype=torch.float16,
+        )
+        _texgen.to("cuda")
+
+        print("Hunyuan3D 2.0 Full loaded successfully")
+    return _pipeline, _texgen
 
 def handler(job):
     """
-    TRELLIS 2 Image-to-3D Generation
+    Hunyuan3D 2.0 Full Image-to-3D Generation
 
     Input:
         image_b64: Base64 encoded input image
-        resolution: Output resolution (512, 1024, or 1536) - default 512
+        steps: Inference steps (default 50 for quality)
         seed: Random seed (-1 for random)
+        texture: Generate textures (default true)
         output_format: 'glb' or 'obj' - default 'glb'
 
     Output:
         mesh_b64: Base64 encoded GLB/OBJ file
         generation_time: Time taken in seconds
-        resolution: Actual resolution used
     """
     start_time = time.time()
 
     job_input = job["input"]
     image_b64 = job_input.get("image_b64")
-    resolution = job_input.get("resolution", 1536)  # Max quality by default
+    steps = job_input.get("steps", 50)  # Higher for quality
     seed = job_input.get("seed", -1)
+    with_texture = job_input.get("texture", True)
     output_format = job_input.get("output_format", "glb")
 
     if not image_b64:
         return {"error": "image_b64 required"}
-
-    # Validate resolution
-    if resolution not in [512, 1024, 1536]:
-        resolution = 512
 
     # Decode input image
     try:
@@ -65,38 +79,35 @@ def handler(job):
     # Set seed
     if seed == -1:
         seed = torch.randint(0, 2**32, (1,)).item()
+    generator = torch.Generator(device="cuda").manual_seed(seed)
 
-    print(f"Generating 3D at {resolution}³ resolution, seed={seed}")
+    print(f"Generating 3D with {steps} steps, texture={with_texture}, seed={seed}")
 
     try:
-        pipeline = get_pipeline()
+        pipeline, texgen = get_pipeline()
 
-        # Generate 3D asset
+        # Generate mesh
         with torch.no_grad():
-            outputs = pipeline.run(
-                image,
-                seed=seed,
-                sparse_structure_sampler_params={
-                    "steps": 12,
-                    "cfg_strength": 7.5,
-                },
-                slat_sampler_params={
-                    "steps": 12,
-                    "cfg_strength": 3,
-                },
-            )
+            mesh = pipeline(
+                image=image,
+                num_inference_steps=steps,
+                generator=generator,
+            )[0]
 
-        # Extract mesh
-        mesh = outputs["mesh"][0]
+        # Generate texture if requested
+        if with_texture and texgen is not None:
+            print("Generating textures...")
+            mesh = texgen(
+                mesh=mesh,
+                image=image,
+                generator=generator,
+            )[0]
 
         # Export to file
         with tempfile.NamedTemporaryFile(suffix=f".{output_format}", delete=False) as f:
             output_path = f.name
 
-        if output_format == "glb":
-            mesh.export(output_path)
-        else:
-            mesh.export(output_path, file_type="obj")
+        mesh.export(output_path)
 
         # Read and encode
         with open(output_path, "rb") as f:
@@ -113,13 +124,14 @@ def handler(job):
         return {
             "mesh_b64": mesh_b64,
             "generation_time": generation_time,
-            "resolution": resolution,
             "seed": seed,
             "format": output_format,
             "size_bytes": len(mesh_data),
+            "with_texture": with_texture,
         }
 
     except Exception as e:
-        return {"error": f"Generation failed: {str(e)}"}
+        import traceback
+        return {"error": f"Generation failed: {str(e)}", "traceback": traceback.format_exc()}
 
 runpod.serverless.start({"handler": handler})
